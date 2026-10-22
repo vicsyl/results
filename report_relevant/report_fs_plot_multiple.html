@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Focal length vs frame</title>
+  <style>
+    :root {
+      --plot-cols: 3;
+      --plot-aspect: 3 / 2;
+    }
+    body { font-family: sans-serif; margin: 16px; color: #222; }
+    h1 { text-align: center; }
+    .page-subtitle { text-align: center; font-size: 20px; font-weight: 400; margin: 0 0 16px; }
+    #plots {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .plot-group {
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      padding: 8px 12px;
+    }
+    .plot-group > summary {
+      text-align: center;
+      font-size: 22px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .plot-group-body {
+      display: grid;
+      grid-template-columns: repeat(var(--plot-cols), minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .plot-scene-label {
+      grid-column: 1 / -1;
+      text-align: center;
+      font-size: 18px;
+      font-weight: 700;
+      margin: 16px 0 6px;
+    }
+    .plot-col-header {
+      font-size: 16px;
+      font-weight: 700;
+      text-align: center;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .plot { min-width: 0; }
+    .plot-empty { color: #999; font-size: 12px; }
+    .row { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; font-size: 12px; }
+    input[type="range"] { flex: 1; min-width: 0; }
+    .chart-wrap { position: relative; aspect-ratio: var(--plot-aspect); }
+    code { background: #f4f4f4; padding: 1px 4px; }
+    #status { color: #a00; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <h1>Focal lengths over frames</h1>
+  <p class="page-subtitle">expand the group and use the slider to see the time evolution</p>
+  <p>
+  </p>
+  <p id="status"></p>
+  <div id="plots"></div>
+  <script src="manifest.js"></script>
+  <script>
+    (function () {
+      const statusEl = document.getElementById("status");
+      const plotsEl = document.getElementById("plots");
+
+      function loadScript(src) {
+        return new Promise((resolve, reject) => {
+          const s = document.createElement("script");
+          s.src = src;
+          s.onload = resolve;
+          s.onerror = () => reject(new Error(src));
+          document.body.appendChild(s);
+        });
+      }
+
+      function estimatedAt(fx, step) {
+        if (!Array.isArray(fx[0])) {
+          return fx;
+        }
+        return fx.map((row) => row[step]);
+      }
+
+      function mountPlot(parent, id, payload) {
+        const fx = payload.fx;
+        const fxGt = payload.fx_gt;
+        const nStored = Array.isArray(fx[0]) ? fx[0].length : 1;
+        const stepIds = payload.steps || [...Array(nStored).keys()];
+        const nOrig = payload.n_steps || (stepIds[stepIds.length - 1] + 1);
+        const initIdx = nStored - 1;
+        const showSlider = nStored > 1;
+        const stepLabel = (idx) => `${stepIds[idx] + 1} / ${nOrig}`;
+
+        const wrap = document.createElement("section");
+        wrap.className = "plot";
+        wrap.innerHTML = `
+          ${showSlider ? `<div class="row">
+            <label>step</label>
+            <input type="range" min="0" max="${nStored - 1}" value="${initIdx}" />
+            <span class="step-value">${stepLabel(initIdx)}</span>
+          </div>` : ""}
+          <div class="chart-wrap"><canvas></canvas></div>
+        `;
+        parent.appendChild(wrap);
+
+        const canvas = wrap.querySelector("canvas");
+        const chart = new Chart(canvas, {
+          type: "line",
+          data: {
+            labels: fx.map((_, i) => i),
+            datasets: [
+              {
+                label: "GT",
+                data: fxGt,
+                borderColor: "green",
+                backgroundColor: "green",
+                borderWidth: 1,
+                pointRadius: 0,
+              },
+              {
+                label: showSlider ? `Estimated (step ${stepLabel(initIdx)})` : "Estimated",
+                data: estimatedAt(fx, initIdx),
+                borderColor: "red",
+                backgroundColor: "red",
+                borderWidth: 1,
+                pointRadius: 0,
+              },
+            ],
+          },
+          options: {
+            animation: false,
+            maintainAspectRatio: false,
+            plugins: { legend: { labels: { boxWidth: 8, font: { size: 10 } } } },
+            scales: {
+              x: { title: { display: false }, ticks: { font: { size: 9 } } },
+              y: { title: { display: false }, beginAtZero: true, ticks: { font: { size: 9 } } },
+            },
+          },
+        });
+
+        if (showSlider) {
+          const stepInput = wrap.querySelector("input");
+          const stepValue = wrap.querySelector(".step-value");
+          stepInput.addEventListener("input", () => {
+            const idx = Number(stepInput.value);
+            stepValue.textContent = stepLabel(idx);
+            chart.data.datasets[1].data = estimatedAt(fx, idx);
+            chart.data.datasets[1].label = `Estimated (step ${stepLabel(idx)})`;
+            chart.update();
+          });
+        }
+      }
+
+      const ids = window.FS_PLOT_IDS || [];
+      const methods = window.FS_PLOT_METHODS || [];
+      const scenes = window.FS_PLOT_SCENES || [];
+      const groups = window.FS_PLOT_GROUPS || [];
+      const nCols = methods.length || 1;
+      document.documentElement.style.setProperty("--plot-cols", String(nCols));
+      if (!ids.length) {
+        statusEl.textContent =
+          "window.FS_PLOT_IDS is missing. Run report_fs.py with steps=\"All\", then open the HTML from the report folder next to data/.";
+        return;
+      }
+
+      (async () => {
+        function mountEmpty(parent) {
+          const empty = document.createElement("section");
+          empty.className = "plot plot-empty";
+          empty.textContent = "no data";
+          parent.appendChild(empty);
+        }
+        function mountColHeaders(parent) {
+          for (const name of methods) {
+            const header = document.createElement("div");
+            header.className = "plot-col-header";
+            header.textContent = name;
+            parent.appendChild(header);
+          }
+        }
+        function mountCell(parent, id) {
+          if (!id) {
+            mountEmpty(parent);
+            return;
+          }
+          const payload = window.FS_PLOTS[id];
+          if (!payload) {
+            statusEl.textContent = `Missing window.FS_PLOTS[${id}]`;
+            mountEmpty(parent);
+            return;
+          }
+          mountPlot(parent, id, payload);
+        }
+        function mountRow(parent, row) {
+          const sceneEl = document.createElement("div");
+          sceneEl.className = "plot-scene-label";
+          sceneEl.textContent = scenes[row] || "";
+          parent.appendChild(sceneEl);
+          mountColHeaders(parent);
+          for (let col = 0; col < nCols; col++) {
+            mountCell(parent, ids[row * nCols + col]);
+          }
+        }
+
+        const nRows = scenes.length || Math.ceil(ids.length / nCols);
+        const ranges = [];
+        for (let row = 0; row < nRows; row++) {
+          if (groups[row] || !ranges.length) {
+            ranges.push({ title: groups[row] || "", start: row, end: row + 1 });
+          } else {
+            ranges[ranges.length - 1].end = row + 1;
+          }
+        }
+
+        window.FS_PLOTS = window.FS_PLOTS || {};
+        const dataRoot = window.FS_DATA_ROOT || ".";
+        for (const range of ranges) {
+          const details = document.createElement("details");
+          details.className = "plot-group";
+          const summary = document.createElement("summary");
+          summary.textContent = range.title;
+          const body = document.createElement("div");
+          body.className = "plot-group-body";
+          details.appendChild(summary);
+          details.appendChild(body);
+          plotsEl.appendChild(details);
+
+          details.addEventListener("toggle", async () => {
+            if (!details.open) {
+              return;
+            }
+            if (details.dataset.mounted === "1") {
+              body.querySelectorAll("canvas").forEach((canvas) => {
+                const chart = Chart.getChart(canvas);
+                if (chart) {
+                  chart.resize();
+                }
+              });
+              return;
+            }
+            details.dataset.mounted = "1";
+            for (let row = range.start; row < range.end; row++) {
+              for (let col = 0; col < nCols; col++) {
+                const id = ids[row * nCols + col];
+                if (id && !window.FS_PLOTS[id]) {
+                  await loadScript(`${dataRoot}/${id}/fs.js`);
+                }
+              }
+              mountRow(body, row);
+            }
+          });
+        }
+      })().catch((err) => {
+        statusEl.textContent = `Could not load fs.js: ${err}`;
+      });
+    })();
+  </script>
+</body>
+</html>
